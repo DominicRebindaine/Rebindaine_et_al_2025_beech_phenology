@@ -1,0 +1,524 @@
+---
+title: "Development underpins the summer solstice reversal of the effects of climate warming on the autumn phenology of European beech"
+subtitle: "Analysis of leaf senescence data for Experiment 2"
+author: "Dominic Rebindaine"
+date: "2025-08-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This document displays the analysis of leaf chlorophyll data of experiment 2 in "Development underpins the summer solstice reversal of the effects of climate warming on the autumn phenology of European beech" Rebindaine et al. (2025). The data is loaded and restructured, leaf senescence dates (end-of-season, EOS) are derived and analysed in context of the various treatments, then figures are plotted.
+
+### Load required packages
+
+```{r, message=FALSE}
+library(tidyverse)
+library(cropgrowdays)
+library(lmerTest)
+require(broom.mixed)
+require(patchwork)
+require(data.table)
+require(lme4)
+require(eoffice)
+require(ggpmisc)
+require(parameters)
+```
+
+### Configure input/output
+
+```{r in/out}
+
+input.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/Data'
+
+output.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/figures/leaves'
+
+```
+
+### Load and restructure data
+
+```{r load data}
+# import data
+chlor.df = read.csv(paste(input.path, '2022_phen_exp_spad.csv', sep = '/'))
+
+chlor.df = chlor.df %>% 
+  mutate(
+    #date formatting
+    measurement.date = as.Date(measurement.date, format = '%d.%m.%Y'),
+    #Convert dates to DOY
+    measurement.doy = day_of_year(measurement.date),
+        # turn treatment groups into meaningful terms and merge controls
+        Treatment = ifelse(group %in% c("A","C", "D","H"),"Control",
+                            ifelse(group %in% c("E"),"Pre_day", 
+                                ifelse(group %in% c("F"),"Pre_night",
+                                   ifelse(group %in% c("G"),"Pre_full", 
+                                          ifelse(group %in% c("I"),"Post_day",
+                                                 ifelse(group %in% c("J"),"Post_night",
+                                   ifelse(group %in% c("K"), "Post_full", "Other"))))))) 
+) %>% 
+  
+    # remove B treatment, and NAs
+  filter(!Treatment %in% c('Other'),
+         !is.na(SPAD)) %>% 
+    # group to individual
+  group_by(id) %>% 
+   # only keep trees with more than 8 measurements
+  filter(n() >= 8) %>% 
+  ungroup()
+   
+     # factorise Treatment and relevel
+  chlor.df$Treatment = as.factor(chlor.df$Treatment)
+  chlor.df$Treatment = fct_relevel(chlor.df$Treatment, 'Control', 'Pre_night', 
+                                   'Pre_full', 'Pre_day', 'Post_night', 'Post_full', 'Post_day')
+
+str(chlor.df)
+
+
+# Convert SPAD to chlorophyll content
+SPADtoChl = function(SPAD){
+  Chl = ifelse(SPAD==0, 0, -0.0029*(SPAD^2) + 1.175*SPAD + 3.8506)
+  return(Chl)
+}
+#SPAD: unitless
+#Chl: leaf chlorophyll in microgram / gram fresh weight
+#Intercept forced to zero
+
+#From Percival et al. 2008: The Potential of a Chlorophyll Content SPAD Meter to Quantify Nutrient Stress in Foliar Tissue of Sycamore (Acer pseudoplatanus), English Oak (Quercus robur), and European Beech (Fagus sylvatica)
+
+chlor.df = chlor.df %>% 
+  mutate(chlorophyll = SPADtoChl(SPAD))
+
+# get mean and sd of groups over time
+sum_chlor = chlor.df %>% 
+  group_by(group, measurement.doy, measurement.date) %>% 
+  summarise(across(chlorophyll, list(
+        mean = \(x) mean(x, na.rm = TRUE), 
+        sd = \(x) sd(x, na.rm = TRUE))),
+    .groups = 'keep')
+
+```
+
+### Outlier detection
+Find measurements that are more than 1.5 times the IQR outside of the lowest/highest quartiles. 
+Quartiles and IQR are computed within treatment and emasurement date.
+
+```{r}
+
+# Function to flag outliers
+flag_iqr_outliers = function(x) {
+  q1 = quantile(x, 0.25, na.rm = TRUE)
+  q3 = quantile(x, 0.75, na.rm = TRUE)
+  iqr = q3 - q1
+  lower = q1 - 1.5 * iqr
+  upper = q3 + 1.5 * iqr
+  return(x < lower | x > upper)
+}
+
+# Apply the function per treatment and date
+chlor_outliers_flagged = chlor.df %>%
+  group_by(Treatment, measurement.date) %>%
+  mutate(outlier = flag_iqr_outliers(chlorophyll)) %>%
+  ungroup()
+
+# visualise outliers
+
+ggplot(chlor_outliers_flagged, aes(x = measurement.date, y = chlorophyll)) +
+  geom_point(aes(color = outlier)) +
+  geom_text(
+    data = subset(chlor_outliers_flagged, outlier == TRUE),
+    aes(label = id),
+    vjust = -0.5,        # adjust vertical position
+    size = 3,            # text size
+    color = "black",     # override point color for visibility
+    check_overlap = TRUE # avoid overlapping labels
+  ) +
+  facet_wrap(~ Treatment) +
+  labs(
+    title = "Outliers by treatment and measurement date (IQR Method)") +
+  theme_minimal()
+
+##### Remove trees with > 1 outlier measurement and then delete outlier points
+
+# Count outliers per tree
+tree_outlier_counts = chlor_outliers_flagged %>%
+  group_by(id) %>%
+  summarise(n_outliers = sum(outlier, na.rm = TRUE)) %>%
+  ungroup()
+
+# Identify trees with more than 1 outlier
+trees_to_remove = tree_outlier_counts %>%
+  filter(n_outliers > 1) %>%
+  pull(id)
+
+# Remove those trees from the dataset
+chlor.df = chlor_outliers_flagged %>%
+  filter(!(id %in% trees_to_remove) & !outlier) %>% 
+    select(!outlier)
+
+message("Removed trees with >1 outlier: ", paste(trees_to_remove, collapse = ", "))
+
+```
+
+### Sample sizes
+
+```{r sample sizes}
+
+for (date in unique(chlor.df$measurement.date)) {
+  
+  print(date)
+  # Observed trees per treatment
+print(table(chlor.df[chlor.df$measurement.date== date,]$Treatment))
+  
+}
+
+# Number of individual trees
+length(unique(chlor.df$id))
+```
+
+### Relative chlorophyll levels
+
+```{r rel chlor}
+
+chlor.df = chlor.df %>%
+  group_by(id)%>%
+  mutate(
+    #get relative chlorophyll content per individual
+    chlorophyll.rel = chlorophyll / max(chlorophyll),
+    #save max chlorophyll content for each individual
+    chlorophyll.max = chlorophyll.rel == max(chlorophyll.rel),
+    #get date of maximum chlorophyll content per individual
+    date.max.chl = measurement.date[which.max(chlorophyll)]) %>%
+  ungroup()
+
+```
+
+
+### EOS (leaf senescence timing) derivation
+
+```{r EOS}
+
+## Interpolate 10%, 25%, 50% and 85% senescence dates from seasonal chlorophyll measurements
+
+# Interpolate EOS10 (date chlorophyll last dropped below 90%)
+senescence.data.10 = chlor.df %>%
+  group_by(id, Treatment) %>%
+  # Find the last row with >90% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.9))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.9))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .9,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS10") %>%
+  ungroup()
+
+# Interpolate EOS25 (date chlorophyll last dropped below 75%)
+senescence.data.25 = chlor.df %>%
+  group_by(id, Treatment) %>%
+  # Find the last row with >75% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.75))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.75))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .75,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS25") %>%
+  ungroup()
+
+# Interpolate EOS50 (date chlorophyll last dropped below 50%)
+senescence.data.50 = chlor.df %>%
+  group_by(id, Treatment) %>%
+  # Find the last row with >50% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.5))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.5))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .5,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS50") %>%
+  ungroup()
+
+# Interpolate EOS85 (date chlorophyll last dropped below 85%)
+senescence.data.85 = chlor.df %>%
+  group_by(id, Treatment) %>%
+  # Find the last row with >85% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.15))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.15))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .15,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS85") %>%
+  ungroup()
+
+# Rbind
+senescence.data = rbind(senescence.data.10,senescence.data.25,senescence.data.50, senescence.data.85)
+
+# save data
+#write_csv(senescence.data, file = paste(input.path, "senescence_data_experiment2.csv", sep = "/"))
+
+# Mean EOS DOY per treatment
+##############################
+
+eos.doy.mean = 
+  senescence.data %>% 
+  group_by(Treatment, phenophase) %>% 
+  summarise(meanEOS.DOY = round(mean(EOS.DOY),1),
+            ci.lower.EOS = round(meanEOS.DOY - 1.96*standard_error(EOS.DOY),1),
+            ci.upper.EOS = round(meanEOS.DOY + 1.96*standard_error(EOS.DOY),1))
+
+
+
+```
+
+
+### ANOVAs by treatment
+
+```{r}
+
+# vector of phenophases
+phenophases = unique(senescence.data$phenophase)
+
+# for loop over all phenophases
+for (phenophase in phenophases) {
+  
+  print(phenophase)
+  
+  model.anova.phenophase = senescence.data %>% 
+    filter(phenophase == phenophase) %>% 
+      aov(EOS.DOY ~ Treatment, data=.)
+  
+  result.anova.phenophase = summary(model.anova.phenophase)
+  
+  print(result.anova.phenophase)
+  
+}
+
+```
+
+
+## EOS Analysis
+
+### EOS50
+
+```{r leaf senescence analysis}
+
+### Linear modelling of leaf senescence timing 
+
+## Treatment as only  predictor variable
+resultsLM.50 = senescence.data.50 %>% 
+  do({model = lm(EOS.DOY ~ Treatment, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) 
+
+resultsLM.50 = resultsLM.50 %>% 
+  mutate(term = factor(term, levels = c('TreatmentPre_night','TreatmentPre_full','TreatmentPre_day', 
+  'TreatmentPost_night', 'TreatmentPost_full', 'TreatmentPost_day')),
+  SEx2 = std.error*2)
+       
+#Show results
+as.data.frame(resultsLM.50) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+```
+
+## Publication Figures
+
+#### Plot theme
+
+```{r plot theme}
+
+  plotTheme1 = theme(
+    legend.position   = "none",
+    legend.background = element_rect(fill=NA, linewidth=0.5, linetype="solid"),
+    legend.text       = element_text(color="black"),
+    panel.background  = element_blank(),
+    axis.text         = element_text(colour = "black"),
+    panel.border      = element_rect(colour = "black", fill=NA),
+    axis.line         = element_line(color = "black"),
+    strip.background  = element_rect(fill=NA),
+    strip.text        = element_text(colour = 'black'),
+    plot.title        = element_text(face="bold",hjust = 0.5))
+  
+  chlorpal = c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a')
+  
+
+```
+
+
+### Leaf senescence figures
+
+#### EOS50
+
+```{r leaf sen pub figs}
+
+# Plot mirrored across y = 0
+################################################
+
+
+## Pre-solstice cooling
+
+LMplot50.pre = ggplot() + 
+  scale_color_manual(values = c('#F21A00', '#F21A00','#F21A00'))+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.50, term %in% c('TreatmentPre_night', 'TreatmentPre_full', 'TreatmentPre_day')), 
+             aes(x=term, y=estimate*-1, color=term), size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.50, term %in% c('TreatmentPre_night', 'TreatmentPre_full', 'TreatmentPre_day')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), linewidth = 1, 
+                width=.2, position=position_dodge(.9)) +
+  coord_cartesian(ylim=c(-10,10))+
+  scale_x_discrete(labels = c('Night','Full-day', 'Day'))+
+  xlab("")+ylab("EOS50 advancement (days)")+
+  plotTheme1 +
+  ggtitle('Pre-solstice cooling')
+
+LMplot50.pre
+
+## Post-solstice cooling
+
+LMplot50.post = ggplot() + 
+  scale_color_manual(values = c('#3B9AB2', '#3B9AB2','#3B9AB2'))+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.50, term %in% c('TreatmentPost_night', 'TreatmentPost_full', 'TreatmentPost_day')), 
+             aes(x=term, y=estimate*-1, color=term), size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.50, term %in% c('TreatmentPost_night', 'TreatmentPost_full', 'TreatmentPost_day')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), linewidth = 1,
+                width=.2, position=position_dodge(.9)) +
+  coord_cartesian(ylim=c(-10,10))+
+  xlab("")+ylab("EOS50 advancement (days)")+
+  scale_x_discrete(labels = c('Night','Full-day', 'Day'))+
+  plotTheme1 +
+  ggtitle('Post-solstice cooling') +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank())
+
+LMplot50.post
+
+```
+
+#### Merge EOS50 plots
+```{r merge plots}
+
+# Merge Night-Full-Day pre- and post plots
+#############################################
+
+# #define plot layout
+layout <- "
+AB"
+
+CombinedLeafSepPlotPre_Post_NFD =  LMplot50.pre + LMplot50.post +
+  plot_layout(design = layout, tag_level = 'new') + plot_annotation(tag_levels = list(c('','','')))&
+  theme(plot.tag = element_text(face = 'bold'), axis.title = element_text(size = 22), plot.title = element_text(size = 22),
+        axis.text = element_text(size = 18))
+
+#Save PDF
+#pdf(paste(output.path,"CombinedLeafSepPlotPre_Post_NFD_flipped.pdf",sep="/"), width=8, height=6, useDingbats=FALSE)
+#CombinedLeafSepPlotPre_Post_NFD
+#dev.off()
+
+
+
+```
+
+### Relative chlor figures
+
+#### By group
+
+```{r}
+# chlor curves
+###################
+
+#move points .05 to the left and right
+pd = position_dodge(2) 
+
+
+# Relative chlor 
+Relchlor_curve = chlor.df %>%
+  ggplot(aes(x=measurement.date, y=chlorophyll.rel*100, colour=Treatment, group=Treatment)) +
+  
+  geom_hline(yintercept = 15, colour="lightgrey")+
+  geom_hline(yintercept = 50, colour="lightgrey")+
+  geom_hline(yintercept = 75, colour="lightgrey")+
+  geom_hline(yintercept = 90, colour="lightgrey")+
+  geom_hline(yintercept = 100, colour="lightgrey")+
+  
+  geom_vline(xintercept = as.Date('2022-11-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-10-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-09-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-08-01'), colour="lightgrey")+
+  
+  stat_summary(fun.data = "mean_se", geom="line", size = 1.2, position=pd, alpha=0.7) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", size = 0.8, width=0, position=pd) +
+  stat_summary(fun.data = "mean_se", geom="point", size = 1.2, position=pd) +
+  
+  scale_color_manual(values = chlorpal)+
+  
+  coord_cartesian(ylim=c(0,100),xlim=c(as.Date(c('2022-06-20','2022-12-16'))))+
+  
+  xlab("") +
+  ylab("Relative chlorophyll content (%)") +
+  
+  #ggtitle("Relative chlor ")+
+  
+  plotTheme1
+
+Relchlor_curve
+
+```
+
+#### By individual
+
+```{r}
+
+# plot relative chlor length for all individs
+individ.relchlor.curves = chlor.df %>% ggplot(
+  aes(x=measurement.date,y=chlorophyll.rel*100,colour = group, fill = group)) +
+  
+  geom_vline(xintercept = as.Date('2022-11-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-10-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-09-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-08-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2022-07-01'), colour="lightgrey")+
+  
+  geom_hline(yintercept = 15, colour="lightgrey")+
+  geom_hline(yintercept = 50, colour="lightgrey")+
+  geom_hline(yintercept = 75, colour="lightgrey")+
+  geom_hline(yintercept = 90, colour="lightgrey")+
+  geom_hline(yintercept = 100, colour="lightgrey")+
+
+  
+  geom_line(aes(x=measurement.date, y=chlorophyll.rel*100), color="black")+
+  geom_point()+
+  
+  geom_vline(data=senescence.data.50, 
+             aes(xintercept = EOS), linetype = "dashed", colour = 'red')+
+   geom_vline(data=senescence.data.10, 
+             aes(xintercept = EOS), linetype = "dashed", colour = 'green')+
+   geom_vline(data=senescence.data.25, 
+             aes(xintercept = EOS), linetype = "dashed", colour = 'blue')+
+   geom_vline(data=senescence.data.85, 
+             aes(xintercept = EOS), linetype = "dashed", colour = 'brown')+
+  
+  coord_cartesian(ylim=c(0,110),xlim=c(as.Date(c('2022-06-20','2022-12-16'))))+
+  
+  xlab("Date") +
+  ylab("Relative chlor (%)") +
+    facet_wrap(~id, dir='v', nrow = 12) +
+    plotTheme1 +
+  theme(legend.position = "none")
+  
+individ.relchlor.curves
+  #Save PDF
+#ggsave(paste(output.path, "individv_chlor_curves_no_removals.pdf", sep = "/"), height = 40, width = 40)
+  
+
+```
+
+## Reproducibility
+
+```{r}
+
+sessionInfo()
+
+```

@@ -1,0 +1,213 @@
+---
+title: "Experiment_2_climate"
+author: "Dominic Rebindaine"
+date: "2025-09-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load required packages
+
+```{r, message=FALSE}
+library(tidyverse)
+```
+
+## Data paths
+
+```{r}
+
+data.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/Data'
+
+output.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/figures'
+
+```
+
+## Data preparation
+
+```{r}
+
+######################################
+# Load and restructure climate data ##
+######################################
+
+day = read.csv(paste(data.dir,'2022_B65.3_day.csv', sep = '/'))
+
+day = day %>% 
+mutate(
+  date = as.Date(date.time, format="%d.%m.%Y %H:%M"),
+  time = format(as.POSIXct(date.time, format="%d.%m.%Y %H:%M"), "%H:%M")) %>% 
+  select(-c('date.time'))
+
+night = read.csv(paste(data.dir,'2022_B65.2_night.csv', sep = '/'))
+
+night = night %>% 
+  mutate(
+    date = as.Date(date.time, format="%d.%m.%Y %H:%M"),
+    time = format(as.POSIXct(date.time, format="%d.%m.%Y %H:%M"), "%H:%M")) %>% 
+  select(-c('date.time'))
+
+full.day = read.csv(paste(data.dir,'2022_C4_full-day.csv', sep = '/'))
+
+full.day = full.day %>% 
+  mutate(
+    date = as.Date(date.time, format="%d.%m.%Y %H:%M"),
+    time = format(as.POSIXct(date.time, format="%d.%m.%Y %H:%M"), "%H:%M")) %>% 
+  select(-c('date.time'))
+
+outside.control = read.csv(paste(data.dir,'2022_outside_control.csv', sep = '/'))
+
+outside.control = outside.control %>% 
+  mutate(
+    date = as.Date(date.time, format="%m.%d.%Y %H:%M:%S"),
+    time = format(as.POSIXct(date.time, format="%m.%d.%Y %H:%M:%S"), "%H:%M")) %>% 
+  select(-c('date.time'))
+
+
+# List of data frames
+dfs <- list(day = day, night = night, full_day = full.day, outside_control = outside.control)
+
+# Rename temp and lux columns for each dataframe
+dfs <- lapply(names(dfs), function(name) {
+  df <- dfs[[name]]
+  df <- df %>%
+    rename(!!paste0("temp_", name) := temp,
+           !!paste0("lux_", name) := lux)
+})
+
+# Merge all dataframes by "date" and "time"
+climate <- reduce(dfs, full_join, by = c("date", "time"))
+
+# only keep treatment dates
+climate = climate %>% 
+  filter(date >= '2022-05-21' & date <= '2022-07-21')
+
+
+# Reshape temperature data
+temp_long <- climate %>%
+  select(date, time, starts_with("temp_")) %>%
+  pivot_longer(cols = starts_with("temp_"), 
+               names_to = "Treatment", 
+               names_prefix = "temp_",  # Remove "temp_" from names
+               values_to = "Temperature")
+
+# Reshape lux data
+lux_long <- climate %>%
+  select(date, time, starts_with("lux_")) %>%
+  pivot_longer(cols = starts_with("lux_"), 
+               names_to = "Treatment", 
+               names_prefix = "lux_",  # Remove "lux_" from names
+               values_to = "Lux")
+
+# Merge temperature and lux into a single dataset
+climate_long <- left_join(temp_long, lux_long, by = c("date", "time", "Treatment"))
+
+
+# Re-add a single datetime column
+climate_long <- climate_long %>%
+  mutate(datetime = ymd_hm(paste(date, time)))  # Combine date and time
+
+```
+
+
+## Plot
+
+### Temperature
+
+```{r}
+## Temperature
+##############################
+
+ggplot(climate_long, aes(x = time, y = Temperature, colour = Treatment, group = Treatment)) +
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  stat_summary(fun.data = mean_cl_normal, geom = "ribbon", aes(fill = Treatment), alpha = 0.2) +
+  labs(title = "Mean Temperature Over Time",
+       x = "Time",
+       y = "Mean Temperature (°C)",
+       colour = "Treatment",
+       fill = "Treatment") +
+  theme_classic()
+
+
+ggplot(climate_long, aes(x = datetime, y = Temperature, color = Treatment, group = Treatment)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  labs(title = "Temperature Over Time by Treatment",
+       x = "Date-Time",
+       y = "Temperature (°C)",
+       color = "Treatment") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+ggplot(climate_long, aes(x = datetime, y = Temperature, color = Treatment, group = Treatment)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  facet_wrap(~ Treatment, scales = "free_y") +
+  labs(title = "Temperature Over Time by Treatment",
+       x = "Date-Time",
+       y = "Temperature (°C)",
+       color = "Treatment") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+```
+
+
+### Light intensity
+
+```{r}
+
+## Light intensity
+##############################
+
+ggplot(climate_long, aes(x = time, y = Lux, color = Treatment, group = Treatment)) +
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  stat_summary(fun.data = mean_cl_normal, geom = "ribbon", aes(fill = Treatment), alpha = 0.2) +
+  labs(title = "Mean Light Intensity (Lux) Over Time",
+       x = "Time",
+       y = "Mean Lux",
+       color = "Treatment",
+       fill = "Treatment") +
+  theme_classic()
+
+
+ggplot(climate_long, aes(x = datetime, y = Lux, color = Treatment, group = Treatment)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  labs(title = "Lux Over Time by Treatment",
+       x = "Date-Time",
+       y = "Lux (°C)",
+       color = "Treatment") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+ggplot(climate_long, aes(x = datetime, y = Lux, color = Treatment, group = Treatment)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  facet_wrap(~ Treatment, scales = "free_y") +
+  labs(title = "Lux Over Time by Treatment",
+       x = "Date-Time",
+       y = "Lux (°C)",
+       color = "Treatment") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+filter(climate_long, time >= '06:00' & time <= '21:00' & Treatment != 'outside_control') %>% 
+  summarise(mean.lux = mean(Lux), sd.lux = sd(Lux))
+
+
+```
+
+
+## Reproducibility
+
+```{r}
+
+# Reproducibility
+############################################################################# 
+sessionInfo()
+
+
+```
+
