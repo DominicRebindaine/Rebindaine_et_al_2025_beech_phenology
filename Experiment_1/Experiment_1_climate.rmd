@@ -1,0 +1,221 @@
+---
+title: "Experiment_1_climate"
+author: "Dominic Rebindaine"
+date: "2025-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### required packages
+
+```{r}
+#####################
+# Required packages #
+#####################
+
+require(ggplot2)
+require(tidyverse)
+require(readxl)
+require(parameters)
+require(broom)
+```
+
+### plot theme
+
+```{r}
+## Plotting preferences
+
+plotTheme1 = theme(
+  legend.position   = "right",
+  legend.background = element_rect(fill=NA, linewidth=0.5, linetype="solid"),
+  legend.text       = element_text(color="black", size = 18),
+  legend.title      = element_text(color="black", size = 20),
+  panel.background  = element_blank(),
+  axis.text         = element_text(colour = "black", size = 20),
+  axis.title        = element_text(colour = "black", size = 22),
+  panel.border      = element_rect(colour = "black", fill=NA),
+  axis.line         = element_line(color = "black"),
+  strip.background  = element_rect(fill=NA),
+  strip.text        = element_text(colour = 'black'),
+  plot.title        = element_text(face="bold",hjust = 0.5))
+
+
+```
+
+
+### set paths
+
+```{r}
+
+#############################
+## Set directory and paths ##
+#############################
+
+
+data.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/data'
+output.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/figures'
+
+
+
+```
+
+### data
+
+```{r}
+
+#####################
+# Load climate data #
+#####################
+
+outside.control = read_excel(paste(data.dir,'Hobo_outside_12.04_07.07.xlsx', sep = '/'))
+
+outside.control = outside.control %>% 
+  mutate(
+    date = as.Date(date.time),
+    time = format(as.POSIXct(date.time), "%H:%M"))
+
+
+outside.control.container = read_excel(paste(data.dir,'Hobo_outside_container.xlsx', sep = '/'))
+
+outside.control.container = outside.control.container %>% 
+  mutate(
+    date = as.Date(date.time),
+    time = format(as.POSIXct(date.time), "%H:%M"))
+
+
+
+```
+
+
+## Plots
+
+```{r}
+
+#############################
+## Plot ##
+#############################
+
+# Temperature
+
+ggplot(filter(outside.control.container, date <= '2023-09-01'), aes(x = date.time, y = temp)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  labs(title = "Temperature Over Time",
+       x = "Date-Time",
+       y = "Temperature (°C)") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+
+ggplot(outside.control, aes(x = date.time, y = temp)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  labs(title = "Temperature Over Time",
+       x = "Date-Time",
+       y = "Temperature (°C)") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+# Light intensity
+
+ggplot(outside.control, aes(x = date.time, y = lux)) +
+  geom_line(size = 1) +  # Line plot for each Treatment
+  labs(title = "Lux Over Time",
+       x = "Date-Time",
+       y = "Lux") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+
+
+# mean Lux each hour during July treatment
+outside.control$group = 'group'
+
+ggplot(filter(outside.control, date >= '2023-06-21' & date <= '2023-07-07'), aes(x = time, y = lux, group = group)) +
+  stat_summary(fun = mean, geom = "line", size = 1) +
+  stat_summary(fun.data = mean_cl_normal, geom = "ribbon", alpha = 0.2) +
+  labs(title = "Mean Lux 21/06/23 - 07/07/23",
+       x = "Time",
+       y = "Mean Lux") +
+  theme_classic()
+
+# mean Lux during July treatment
+ggplot(filter(outside.control, date >= '2023-06-21' & date <= '2023-07-07' & time >= '06:00' & time <= '21:00'), 
+       aes(x = group, y = lux)) +
+  geom_boxplot(outliers = F) +
+  labs(title = "Lux 06:00-21:00 21/06/23 - 07/07/23",
+       x = "Outside control",
+       y = "Lux") +
+  theme_classic()
+
+filter(outside.control, date >= '2023-06-21' & date <= '2023-07-07' & time >= '06:00' & time <= '21:00') %>% 
+  summarise(mean.lux = mean(lux), sd.lux = sd(lux))
+
+
+#############################
+## Soil water content ##
+#############################
+
+swc = read.csv(paste(data.dir,'SWC_measurements.csv', sep = '/'))
+
+#names(swc) = c('id','group','number','cooling.level','lo.timing','treatment.timing',seq(1,8))
+
+swc = pivot_longer(swc, 
+  cols = c("X27.06.2023","X07.07.2023","X22.07.2023","X04.08.2023","X16.08.2023","X01.09.2023","X12.10.2023","X23.10.2023"),
+  values_to = 'SWC', names_to = 'date') %>% 
+  mutate(date = as.Date(sub('.','',date), format = "%d.%m.%Y"))
+
+AverageSummarySWC = swc %>% 
+  group_by(group,date) %>% 
+  summarise(
+    mean.swc = round(mean(SWC, na.rm = T),1),
+    ci.lower.swc = round(mean.swc - 1.96*standard_error(SWC, na.rm = T),1),
+    ci.upper.swc = round(mean.swc + 1.96*standard_error(SWC, na.rm = T),1))
+
+AverageSummarySWC %>% ggplot() +
+  geom_line(aes(date, mean.swc, group = group, colour = group)) +
+  geom_errorbar(aes(x = date, ymin = AverageSummarySWC$ci.lower.swc, ymax = AverageSummarySWC$ci.upper.swc), 
+                width = 0.5, position = position_dodge(width = 0.25)) +
+ plotTheme1
+
+swc.boxplot = swc %>% ggplot() +
+  geom_boxplot(aes(date, SWC, group = interaction(date, group), fill = group),outliers = F) +
+  labs(x = 'Date',
+       y = 'Soil Water Content (%)',
+       fill = 'Treatment') +
+plotTheme1
+
+swc.boxplot
+# save boxplot
+#ggsave(filename = 'Exp1_swc_boxplot.pdf', path = output.dir, plot = swc.boxplot)
+
+```
+
+## ANOVA
+
+```{r}
+
+# ANOVA of soil water content by group
+anova.swc = aov(SWC ~ group, data = swc)
+summary(anova.swc)
+TukeyHSD(anova.swc)
+
+# show only significant differences
+tidy(TukeyHSD(anova.swc)) %>% filter(adj.p.value <= 0.05)
+
+
+```
+
+
+## Reproducibility
+
+```{r}
+
+## Reproducibility
+
+sessionInfo()
+
+
+```

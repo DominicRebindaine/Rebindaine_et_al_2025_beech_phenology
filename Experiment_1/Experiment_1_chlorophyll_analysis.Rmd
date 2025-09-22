@@ -1,0 +1,931 @@
+---
+title: "Development underpins the summer solstice reversal of the effects of climate warming on the autumn phenology of European beech"
+subtitle: "Analysis of leaf senescence data for Experiment 1"
+author: "Dominic Rebindaine"
+date: "2025-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This document displays the analysis of leaf chlorophyll data of experiment 1 in "Development underpins the summer solstice reversal of the effects of climate warming on the autumn phenology of European beech" Rebindaine et al. (2025). The data is loaded and restructured, leaf senescence dates (end-of-season, EOS) are derived and analysed in context of the various treatments, then figures are plotted.
+
+### Load required packages
+
+```{r, message = FALSE}
+library(tidyverse)
+library(cropgrowdays)
+library(lmerTest)
+require(broom.mixed)
+require(patchwork)
+require(data.table)
+require(lme4)
+require(eoffice)
+require(ggpmisc)
+require(parameters)
+library(MuMIn)
+library(vegan)
+```
+
+### Configure input/output
+
+```{r in/out}
+
+input.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/data'
+
+output.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/figures/leaves/new'
+
+```
+
+### Load and restructure data
+
+```{r load data}
+# import data
+chlor.df = read.csv(paste(input.path, '2023_phen_exp_spad.csv', sep = '/'))
+
+chlor.df = chlor.df %>% 
+  # remove second last measurement point as data from 07.12.2023 is anomalous - unreasonably high due to widespread browning, which causes false readings.
+  select(-c('SPAD.07.12.2023')) %>% 
+  #turn treatment groups into meaningful terms
+    mutate(treatment.timing = ifelse(group %in% c('N','P','O','Q'), 'July',
+                                   ifelse(group %in% c('R','S','T','U'), 'August', 'Control')),
+          cooling.level = ifelse(group %in% c('N','O','R','S'), 'Moderate',
+                                ifelse(group %in% c('P','Q','T','U'), 'Extreme', 'Control'))) %>% 
+  # Make the df long format
+pivot_longer(-c('id', 'group', 'number', 'cooling.level', 'lo.timing', 'treatment.timing', 'lo.doy'),
+                           names_to = 'measurement.date', values_to = 'SPAD')
+
+# recode measurement date to date and remove 'SPAD.' string
+chlor.df$measurement.date = as.Date(substr(chlor.df$measurement.date,6,15), format = '%d.%m.%Y')
+
+str(chlor.df)
+
+######### factorise and relevel predictors
+
+# leaf-out timing
+chlor.df$lo.timing = as.factor(chlor.df$lo.timing)
+# treatment timing
+chlor.df$treatment.timing = as.factor(chlor.df$treatment.timing)
+chlor.df$treatment.timing = fct_relevel(chlor.df$treatment.timing, 'Control', 'July')
+# cooling level
+chlor.df$cooling.level = as.factor(chlor.df$cooling.level)
+chlor.df$cooling.level = fct_relevel(chlor.df$cooling.level, 'Control', 'Moderate')
+
+# remove NAs
+chlor.df = chlor.df %>% 
+  filter(!is.na(SPAD)) %>% 
+ # group to individual 
+  group_by(id) %>% 
+   # only keep leaves with more than 8 measurements
+     filter(n() >= 8) %>% 
+      ungroup()
+
+# Add measurement.doy column
+chlor.df$measurement.doy = day_of_year(chlor.df$measurement.date)
+
+# remove L217 as it senesced abnormally early
+chlor.df = chlor.df %>% filter(id != 'L217')
+
+# Convert SPAD to chlorophyll content
+SPADtoChl = function(SPAD){
+  Chl = ifelse(SPAD==0, 0, -0.0029*(SPAD^2) + 1.175*SPAD + 3.8506)
+  return(Chl)
+}
+#SPAD: unitless
+#Chl: leaf chlorophyll in microgram / gram fresh weight
+#Intercept forced to zero
+
+#From Percival et al. 2008: The Potential of a Chlorophyll Content SPAD Meter to Quantify Nutrient Stress in Foliar Tissue of Sycamore (Acer pseudoplatanus), English Oak (Quercus robur), and European Beech (Fagus sylvatica)
+
+chlor.df = chlor.df %>% 
+  mutate(chlorophyll = SPADtoChl(SPAD))
+
+# get mean and sd of groups over time
+sum_chlor = chlor.df %>% 
+  group_by(group, measurement.doy, measurement.date, treatment.timing, lo.timing, cooling.level) %>% 
+  summarise(across(chlorophyll, list(
+        mean = \(x) mean(x, na.rm = TRUE), 
+        sd = \(x) sd(x, na.rm = TRUE))),
+    .groups = 'keep')
+
+```
+
+
+### Outlier detection
+Find measurements that are more than 1.5 times the IQR outside of the lowest/highest quartiles. 
+Quartiles and IQR are computed within treatment and measurement date.
+
+```{r}
+
+# Function to flag outliers
+flag_iqr_outliers = function(x) {
+  q1 = quantile(x, 0.25, na.rm = TRUE)
+  q3 = quantile(x, 0.75, na.rm = TRUE)
+  iqr = q3 - q1
+  lower = q1 - 1.5 * iqr
+  upper = q3 + 1.5 * iqr
+  return(x < lower | x > upper)
+}
+
+# Apply the function per treatment and date
+chlor_outliers_flagged = chlor.df %>%
+  group_by(group, measurement.date) %>%
+  mutate(outlier = flag_iqr_outliers(chlorophyll)) %>%
+  ungroup()
+
+# visualise outliers
+
+ggplot(chlor_outliers_flagged, aes(x = measurement.date, y = chlorophyll)) +
+  geom_point(aes(color = outlier)) +
+  geom_text(
+    data = subset(chlor_outliers_flagged, outlier == TRUE),
+    aes(label = id),
+    vjust = -0.5,        # adjust vertical position
+    size = 3,            # text size
+    color = "black",     # override point color for visibility
+    check_overlap = TRUE # avoid overlapping labels
+  ) +
+  facet_wrap(~ group) +
+  labs(
+    title = "Outliers by treatment and measurement date (IQR Method)") +
+  theme_minimal()
+
+##### Remove trees with > 1 outlier measurement and then delete outlier points
+
+# Count outliers per tree
+tree_outlier_counts = chlor_outliers_flagged %>%
+  group_by(id) %>%
+  summarise(n_outliers = sum(outlier, na.rm = TRUE)) %>%
+  ungroup()
+
+# Identify trees with more than 1 outlier
+trees_to_remove = tree_outlier_counts %>%
+  filter(n_outliers > 1) %>%
+  pull(id)
+
+# Remove those trees from the dataset
+chlor.df = chlor_outliers_flagged %>%
+  filter(!(id %in% trees_to_remove) & !outlier) %>% 
+    select(!outlier)
+
+message("Removed trees with >1 outlier: ", paste(trees_to_remove, collapse = ", "))
+
+```
+
+
+### Sample sizes
+
+```{r sample sizes}
+for (date in unique(chlor.df$measurement.date)) {
+  
+  print(date-19357) # returns date as doy
+  # Observed trees per treatment
+print(table(chlor.df[chlor.df$measurement.date== date,]$group))
+  
+}
+
+# Number of individual trees
+length(unique(chlor.df$id))
+```
+
+### Relative chlorophyll levels
+
+```{r rel chlor}
+
+chlor.df = chlor.df %>%
+  group_by(id)%>%
+  mutate(
+    #get relative chlorophyll content per individual
+    chlorophyll.rel = chlorophyll / max(chlorophyll),
+    #save max chlorophyll content for each individual
+    chlorophyll.max = chlorophyll.rel == max(chlorophyll.rel),
+    #get date of maximum chlorophyll content per individual
+    date.max.chl = measurement.date[which.max(chlorophyll)]) %>%
+  ungroup()
+
+```
+
+
+### EOS (leaf senescence timing) derivation
+
+```{r EOS}
+
+## Interpolate 10%, 25%, 50% and 85% senescence dates from seasonal chlorophyll measurements
+
+# Interpolate EOS10 (date chlorophyll last dropped below 90%)
+senescence.data.10 = chlor.df %>%
+  group_by(id, group, lo.doy, cooling.level, lo.timing, treatment.timing) %>%
+  # Find the last row with >90% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.9))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.9))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .9,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS10") %>%
+  ungroup()
+
+# Interpolate EOS25 (date chlorophyll last dropped below 75%)
+senescence.data.25 = chlor.df %>%
+  group_by(id, group, lo.doy, cooling.level, lo.timing, treatment.timing) %>%
+  # Find the last row with >75% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.75))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.75))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .75,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS25") %>%
+  ungroup()
+
+# Interpolate EOS50 (date chlorophyll last dropped below 50%)
+senescence.data.50 = chlor.df %>%
+  group_by(id, group, lo.doy, cooling.level, lo.timing, treatment.timing) %>%
+  # Find the last row with >50% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.5))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.5))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .5,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS50") %>%
+  ungroup()
+
+# Interpolate EOS85 (date chlorophyll last dropped below 85%)
+senescence.data.85 = chlor.df %>%
+  group_by(id, group, lo.doy, cooling.level, lo.timing, treatment.timing) %>%
+  # remove measurements on 07.12.23 due to measurement error
+  #filter(measurement.date != '2023-12-07') %>% 
+  # remove P318 as it never falls below 20% of its peak chlorophyll
+  filter(id != 'P318') %>% 
+  # Find the last row with >85% chlorophyll in each group, keep only this row and next
+  filter(row_number() <= max(which(chlorophyll.rel > 0.15))+1,
+         row_number() >= max(which(chlorophyll.rel > 0.15))) %>%
+  #Linear interpolation
+  dplyr::summarize(EOS     = as.Date(approx(chlorophyll.rel, measurement.date, .15,  ties=min)$y, origin="1970-01-01")) %>%
+  mutate(EOS.DOY    = yday(EOS),
+         phenophase = "EOS85") %>%
+  ungroup()
+
+# Rbind
+senescence.data = rbind(senescence.data.10,senescence.data.25,senescence.data.50, senescence.data.85)
+
+# Mean EOS DOY per treatment
+##############################
+
+eos.doy.mean = 
+  senescence.data %>% 
+  group_by(group, phenophase) %>% 
+  summarise(mean.EOS.DOY = round(mean(EOS.DOY),0))
+
+
+# Summary for EOS50
+##############################
+
+AverageSummary.EOS50 = senescence.data.50 %>% 
+  group_by(group) %>% 
+  summarise(
+    mean.LO.DOY = round(mean(lo.doy),1),
+            ci.lower.LO = round(mean.LO.DOY - 1.96*standard_error(lo.doy),1),
+            ci.upper.LO = round(mean.LO.DOY + 1.96*standard_error(lo.doy),1),
+    meanEOS.DOY = round(mean(EOS.DOY),1),
+            ci.lower.EOS = round(meanEOS.DOY - 1.96*standard_error(EOS.DOY),1),
+            ci.upper.EOS = round(meanEOS.DOY + 1.96*standard_error(EOS.DOY),1)
+  )
+
+```
+
+### Complete dataframe
+
+```{r}
+# Translate lettered groups into treatment descriptions
+senescence.data = senescence.data %>% 
+  mutate(
+    # add column to combine treatment.timing and cooling.level
+    treat.cool.combined = paste(treatment.timing, cooling.level,sep = ".")
+    )
+
+##factorise and relevel treat.cool.combined
+senescence.data$treat.cool.combined = as.factor(senescence.data$treat.cool.combined)
+senescence.data$treat.cool.combined = fct_relevel(senescence.data$treat.cool.combined, 'Control.Control', 'July.Moderate', 'July.Extreme', 'August.Moderate', 'August.Extreme')
+
+# save prepared dataframe
+write_csv(senescence.data, file = paste(input.path, "senescence_data_experiment1.csv", sep = "/"))
+
+```
+
+### ANOVAs by treatment
+
+```{r}
+
+# vector of phenophases
+phenophases = unique(senescence.data$phenophase)
+
+# for loop over all phenophases
+for (phenophase in phenophases) {
+  
+  print(phenophase)
+  
+  model.anova.phenophase = senescence.data %>% 
+    filter(phenophase == phenophase) %>% 
+      aov(EOS.DOY ~ group, data=.)
+  
+  result.anova.phenophase = summary(model.anova.phenophase)
+  
+  print(result.anova.phenophase)
+  
+}
+
+```
+### ANOVAs by leaf-out timing
+
+```{r}
+
+# for loop over all phenophases
+for (phenophase in phenophases) {
+  
+  print(phenophase)
+  
+  model.lo.anova.phenophase = senescence.data %>% 
+    filter(phenophase == phenophase) %>% 
+      aov(EOS.DOY ~ lo.timing, data=.)
+  
+  result.lo.anova.phenophase = summary(model.lo.anova.phenophase)
+  
+  print(result.lo.anova.phenophase)
+  
+}
+
+```
+
+### EOS Analysis
+
+```{r leaf senescence analysis}
+
+### Linear modelling of leaf senescence timing 
+
+## Treatment as only  predictor variable
+resultsLM = senescence.data.50 %>% 
+  do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+  mutate(term = factor(term, levels = c("groupM", "groupN", "groupO", "groupP", "groupQ", "groupR", "groupS", "groupT", "groupU")))
+
+resultsLM = resultsLM %>% mutate(term = c("Late_control_control", "Early_july_Moderate", "Late_july_Moderate", "Early_july_Extreme", "Late_july_Extreme", "Early_august_Moderate", "Late_august_Moderate", "Early_august_Extreme", "Late_august_Extreme"))
+       
+#Show results
+as.data.frame(resultsLM) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=1)
+
+## Leaf-out timing as fixed predictor variable
+resultsLM.LO = senescence.data.50 %>% 
+  do({model = lm(EOS.DOY ~ lo.timing, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+  mutate(SEx2 = std.error*2)
+
+#Show results
+as.data.frame(resultsLM.LO) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+```
+
+#### Early groups only model
+
+```{r early only model}
+resultsLM.Early = senescence.data.50 %>% 
+  filter(lo.timing == 'early') %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupN", "groupP", "groupR", "groupT")),
+        SEx2 = std.error*2,
+        lo.timing = 'early')
+  
+#Show results
+as.data.frame(resultsLM.Early) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+# save results for plotting later
+toplot.resultsLM.Early = as.data.frame(resultsLM.Early) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+```
+
+#### Late groups only model
+
+```{r late only model}
+resultsLM.Late = senescence.data.50 %>% 
+  filter(lo.timing == 'late') %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupO", "groupQ", "groupS", "groupU")),
+        SEx2 = std.error*2,
+        lo.timing = 'late')
+  
+#Show results
+as.data.frame(resultsLM.Late) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)   
+
+# save results for plotting later
+toplot.resultsLM.Late = as.data.frame(resultsLM.Late) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+# merge early and late dfs for plotting later
+toplot.resultsLMEarlyLate = rbind(toplot.resultsLM.Early,toplot.resultsLM.Late)
+
+# relevel factors to put treatment pairs in right order
+toplot.resultsLMEarlyLate$term = fct_relevel(toplot.resultsLMEarlyLate$term, 'groupN', 'groupO', 'groupP', 'groupQ', 'groupR', 'groupS', 'groupT', 'groupU')
+```
+
+#### L vs M analysis
+
+```{r L vs M}
+resultsLM.LvM = senescence.data.50 %>% 
+  filter(group %in% c('L','M')) %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupM")),SEx2 = std.error*2)
+  
+       
+#Show results
+as.data.frame(resultsLM.LvM) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+```
+
+#### N vs O analysis
+
+```{r N vs O}
+resultsLM.NvO = senescence.data.50 %>% 
+  filter(group %in% c('N','O')) %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupO")),SEx2 = std.error*2)
+  
+       
+#Show results
+as.data.frame(resultsLM.NvO) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+```
+
+#### P vs Q analysis
+
+```{r P vs Q}
+resultsLM.PvQ = senescence.data.50 %>% 
+  filter(group %in% c('P','Q')) %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupQ")),SEx2 = std.error*2)
+  
+       
+#Show results
+as.data.frame(resultsLM.PvQ) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+```
+
+#### R vs S analysis
+
+```{r R vs S}
+resultsLM.RvS = senescence.data.50 %>% 
+  filter(group %in% c('R','S')) %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupS")),SEx2 = std.error*2)
+  
+       
+#Show results
+as.data.frame(resultsLM.RvS) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+```
+
+#### T vs U analysis
+
+```{r T vs U}
+resultsLM.TvU = senescence.data.50 %>% 
+  filter(group %in% c('T','U')) %>% 
+do({model = lm(EOS.DOY ~ group, data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+ mutate(term = factor(term, levels = c("groupU")),SEx2 = std.error*2)
+  
+       
+#Show results
+as.data.frame(resultsLM.TvU) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+```
+
+#### Days of autumn delay per day of spring delay
+
+```{r days per day}
+
+##################################################################################
+## Linear mixed effects model on Autumn leaf senescence change per day change in leaf-out
+##################################################################################
+
+## Leaf-out doy as fixed predictor variable with treatment combination (timing plus cooling level) as a random variable
+resultsLM.LOD = senescence.data %>% 
+    filter(phenophase == "EOS50") %>% 
+     do({model = lme4::lmer(EOS.DOY ~ lo.doy + (1|treat.cool.combined), data=.)  # create the model
+       data.frame(tidy(model, effect="fixed"))}) %>%
+        filter(!term %in% c("(Intercept)")) %>% 
+          mutate(SEx2 = std.error*2)
+
+#Show results
+as.data.frame(resultsLM.LOD) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+
+## Only using control treatments
+resultsLM.LOD.Control = senescence.data.50 %>% filter(group %in% c('L','M')) %>% 
+  do({model = lm(EOS.DOY ~ lo.doy , data=.)  # create the model
+  data.frame(tidy(model))}) %>%
+  filter(!term %in% c("(Intercept)")) %>% 
+  mutate(SEx2 = std.error*2)
+
+#Show results
+as.data.frame(resultsLM.LOD.Control) %>%
+  dplyr::select(-c(statistic))%>%
+  mutate_if(is.numeric, round, digits=2)
+
+
+```
+
+## Publication Figures
+
+#### Plot theme
+
+```{r plot theme}
+
+  plotTheme1 = theme(
+    legend.position   = "right",
+    legend.background = element_rect(fill=NA, linewidth=0.5, linetype="solid"),
+    legend.text       = element_text(color="black"),
+    panel.background  = element_blank(),
+    axis.text         = element_text(colour = "black"),
+    panel.border      = element_rect(colour = "black", fill=NA),
+    axis.line         = element_line(color = "black"),
+    strip.background  = element_rect(fill=NA),
+    strip.text        = element_text(colour = 'black'),
+    plot.title        = element_text(face="bold",hjust = 0.5))
+  
+  chlorpal = c('#a6cee3','#1f78b4','#b2df8a','#33a02c','#fb9a99','#e31a1c','#fdbf6f','#ff7f00','#cab2d6','#6a3d9a')
+  
+
+```
+
+
+### Leaf senescence figures
+
+```{r leaf sen pub figs}
+
+## plot only Moderate cooling from combined early and late df using facet_grid spacing with points flipped over y = 0
+# collapse groups for facetting
+toplot.resultsLMEarlyLate2 = toplot.resultsLMEarlyLate %>% 
+  mutate(category = fct_collapse(term, 
+                                 July_Moderate = c('groupN','groupO'),
+                                 July_Extreme = c('groupP','groupQ'),
+                                 August_Moderate = c('groupR','groupS'),
+                                 August_Extreme = c('groupT','groupU')))
+
+# plot
+LMplotLeafSenModerate = ggplot() + 
+  scale_color_manual(values = c('#48b649','#2964af'), name = 'Leaf-out timing')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(toplot.resultsLMEarlyLate2, term %in% c("groupN", "groupO", "groupR", "groupS")), 
+             aes(x=term, y=-1*estimate, color=lo.timing), size = 3.5,
+             position=position_dodge(3))+
+  geom_errorbar(data=filter(toplot.resultsLMEarlyLate2, term %in% c("groupN", "groupO", "groupR", "groupS")), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=lo.timing), 
+                width=.2, size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+  xlab("")+ylab("leaf senescence advancement (days)")+
+  
+  facet_grid(cols = vars(category), scales = 'free_x', space = 'free_x', switch = 'x')+
+  plotTheme1 +
+  theme(panel.spacing.x = unit(0,"cm"), axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+        axis.text = element_text(size = 20), axis.title = element_text(size = 22),
+        strip.text.x = element_text(size = 22), strip.placement = 'outside',
+        legend.position.inside = c(.82, .18), legend.title = element_text(size = 20), legend.text = element_text(size = 20)
+       )
+LMplotLeafSenModerate
+
+#topptx(figure = LMplotLeafSenModerate, filename = 'LMplotLeafSenModerate.pptx')
+ 
+#Save PDF
+#ggsave(filename = "Fig2b_moderate_flipped.pdf", plot = LMplotLeafSenModerate, path = output.path, width = 7, height = 6, useDingbats=FALSE)
+
+
+####
+# plot extreme cooling only from combined early and late df using facet_grid spacing with points flipped over y = 0
+
+LMplotLeafSenExtreme = ggplot() + 
+  scale_color_manual(values = c('#48b649','#2964af'), name = 'Leaf-out timing')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(toplot.resultsLMEarlyLate2, term %in% c("groupP", "groupQ", "groupT", "groupU")), 
+             aes(x=term, y=-1*estimate, color=lo.timing), size = 3.5,
+             position=position_dodge(3))+
+  geom_errorbar(data=filter(toplot.resultsLMEarlyLate2, term %in% c("groupP", "groupQ", "groupT", "groupU")), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=lo.timing), 
+                width=.2, size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+  xlab("")+ylab("leaf senescence advancement (days)")+
+  
+  facet_grid(cols = vars(category), scales = 'free_x', space = 'free_x', switch = 'x')+
+  plotTheme1 +
+  theme(panel.spacing.x = unit(0,"cm"), axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+        axis.text = element_text(size = 20), axis.title = element_text(size = 22),
+        strip.text.x = element_text(size = 22), strip.placement = 'outside',
+        legend.position.inside = c(.82, .18), legend.title = element_text(size = 20), legend.text = element_text(size = 20)
+       )
+
+LMplotLeafSenExtreme
+
+#topptx(figure = LMplotLeafSenExtreme, filename = 'LMplotLeafSenExtreme.pptx')
+#Save PDF
+#ggsave(filename = "SuppFig_extreme_flipped.pdf", plot = LMplotLeafSenExtreme, path = output.path, width = 7, height = 6, useDingbats=FALSE)
+
+ ################################################################
+
+################################
+# plot from all treatments from combined early and late df using facet_grid spacing
+# collapse groups for facetting
+
+# plot
+LMplotLeafSen2 = ggplot() + 
+  scale_color_manual(values = c('#48b649','#2964af'))+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(toplot.resultsLMEarlyLate2, term %in% c("groupN", "groupO", "groupP", "groupQ", "groupR", "groupS", "groupT", "groupU")), 
+             aes(x=term, y=estimate*-1, color=lo.timing), size = 3.5,
+             position=position_dodge(3))+
+  geom_errorbar(data=filter(toplot.resultsLMEarlyLate2, term %in% c("groupN", "groupO", "groupP", "groupQ", "groupR", "groupS", "groupT", "groupU")), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=lo.timing), size = 1.5, 
+                width=.2, position=position_dodge(.9)) +
+  coord_cartesian(ylim=c(-10,10))+
+  xlab("")+ylab("Leaf senescence advancement (days)")+
+  labs(color = "Leaf-out \n timing") +
+  facet_grid(cols = vars(category), scales = 'free_x', space = 'free_x', switch = "x")+
+  plotTheme1 +
+  theme(panel.spacing.x = unit(-1,"cm"), axis.text = element_text(size = 20), axis.title = element_text(size = 22), axis.text.x = element_blank(), axis.ticks.x = element_blank(), panel.border = element_blank(), legend.position = "inside", legend.position.inside = c(.25, .80), legend.title = element_text(size = 20), legend.text = element_text(size = 20), strip.text.x = element_text(size = 22))
+
+LMplotLeafSen2
+#topptx(figure = LMplotLeafSen2, filename = 'LMplotLeafSen2.pptx')
+################################
+
+## Early and late treatment pairs e.g. early_control_control vs late_control_control
+# LvsM
+LMplot90.LvM = ggplot() + 
+  scale_color_manual(values = 'dodgerblue3')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.LvM, term %in% c('groupM')), 
+             aes(x=term, y=estimate*-1, color=term),size = 3.5,)+
+  geom_errorbar(data=filter(resultsLM.LvM, term %in% c('groupM')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), 
+                width=.2, size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+   scale_x_discrete(labels = 'Control') +
+  xlab("")+ylab("leaf senescence advancement (days)")+
+  plotTheme1 +
+   theme(legend.position = "none", panel.border = element_blank(), axis.text = element_text(size = 18), axis.title.y = element_text(size = 20))
+
+LMplot90.LvM
+
+# NvsO
+LMplot90.NvO = ggplot() + 
+ scale_color_manual(values = 'dodgerblue3')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.NvO, term %in% c('groupO')), 
+             aes(x=term, y=estimate*-1, color=term),size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.NvO, term %in% c('groupO')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), 
+                width=.2, size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+  scale_x_discrete(labels = 'July_Moderate') +
+  xlab("")+ylab("")+
+  plotTheme1 +
+   theme(legend.position = "none", axis.line.y = element_blank(), axis.text.y = element_blank(), panel.border = element_blank(), axis.ticks.y = element_blank(), axis.text = element_text(size = 18))
+
+LMplot90.NvO
+
+# PvsQ
+LMplot90.PvQ = ggplot() + 
+ scale_color_manual(values = 'dodgerblue3')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.PvQ, term %in% c('groupQ')), 
+             aes(x=term, y=estimate*-1, color=term),size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.PvQ, term %in% c('groupQ')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), 
+                width=.2,size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+  scale_x_discrete(labels = 'July_Extreme') +
+  xlab("")+ylab("")+
+  plotTheme1 +
+   theme(legend.position = "none") +theme(legend.position = "none", axis.line.y = element_blank(), axis.text.y = element_blank(), panel.border = element_blank(), axis.ticks.y = element_blank(), axis.text = element_text(size = 18))
+
+LMplot90.PvQ
+
+# RvsS
+LMplot90.RvS = ggplot() + 
+ scale_color_manual(values = 'dodgerblue3')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.RvS, term %in% c('groupS')), 
+             aes(x=term, y=estimate*-1, color=term),size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.RvS, term %in% c('groupS')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), 
+                width=.2,size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+  scale_x_discrete(labels = 'August_Moderate') +
+  xlab("")+ylab("")+
+  plotTheme1 +
+   theme(legend.position = "none") +
+  theme(legend.position = "none", axis.line.y = element_blank(), axis.text.y = element_blank(), panel.border = element_blank(), axis.ticks.y = element_blank(), axis.text = element_text(size = 18))
+
+LMplot90.RvS
+
+# TvsU
+LMplot90.TvU = ggplot() + 
+ scale_color_manual(values = 'dodgerblue3')+
+  geom_hline(yintercept=0)+
+  geom_point(data= filter(resultsLM.TvU, term %in% c('groupU')), 
+             aes(x=term, y=estimate*-1, color=term),size = 3.5)+
+  geom_errorbar(data=filter(resultsLM.TvU, term %in% c('groupU')), 
+                aes(x=term, ymin=-1*estimate-1.96*std.error, ymax=-1*estimate+1.96*std.error, color=term), 
+                width=.2,size = 1.5) +
+  coord_cartesian(ylim=c(-10,10))+
+    scale_x_discrete(labels = 'August_Extreme') +
+  xlab("")+ylab("")+
+  plotTheme1 +
+   theme(legend.position = "none") +
+  theme(legend.position = "none", axis.line.y = element_blank(), axis.text.y = element_blank(), panel.border = element_blank(), axis.ticks.y = element_blank(), axis.text = element_text(size = 18))
+
+LMplot90.TvU
+################################
+
+# leaf senescence by leaf-out timing boxplot
+ lo.eos.boxplot = 
+senescence.data.50 %>% ggplot(aes(lo.timing, EOS, fill = lo.timing)) + 
+  geom_boxplot(notch = T) + 
+  scale_fill_manual(values = c('#48b649','#2964af')) +
+   xlab('')+ylab("leaf senescence date") +
+  plotTheme1 + theme(legend.position = "none", axis.text = element_text(size = 20), axis.title = element_text(size = 22), axis.text.y = element_text(angle = 15))
+
+ lo.eos.boxplot
+
+#######################################
+## Save plots
+#######################################
+
+# Early vs Late LeafSen boxplot
+#topptx(figure = lo.eos.boxplot, filename = 'early_vs_late_boxplot.pptx')
+ 
+ #ggsave(filename = 'LeafSenBoxplot.pdf', plot = lo.eos.boxplot, path = output.path, height = 6, width = 7)
+
+# Merge separated leaf senescence anomaly plots with each treatment compared to its respective control as well as early vs late boxplot
+ 
+ layout = "AAA
+ BBB"
+ 
+ CombinedBox_AnomalyPlot = lo.eos.boxplot + LMplotLeafSenModerate +
+   plot_layout(design = layout, tag_level = 'new') + plot_annotation(tag_levels = c('a','b')) &
+  theme(plot.tag = element_text(face = 'bold'))
+ 
+  CombinedBox_AnomalyPlot
+
+#####
+  # save anomaly plot of all early and late treatments
+  ggsave(plot = LMplotLeafSen2, path = output.path, 
+         filename = "SuppFig_LeafSenescenceAnomalies.pdf", h = 7, w = 11)
+  
+  
+######################################################################################
+
+#Merge anomaly plots
+#define plot layout
+layout2 <- "ABCDE"
+
+CombinedchlorSepPlotEarlyLate2 = LMplot90.LvM + LMplot90.NvO + LMplot90.PvQ + LMplot90.RvS + LMplot90.TvU +
+  plot_layout(design = layout2, tag_level = 'new')
+  
+CombinedchlorSepPlotEarlyLate2
+#topptx(figure= CombinedchlorSepPlotEarlyLate2, filename = 'CombinedchlorSepPlotEarlyLate2.pptx')
+
+#ggsave(filename = 'SuppFig_all_treatments.pdf', plot = CombinedchlorSepPlotEarlyLate2, path = output.path, height = 6, width = 11)
+
+```
+
+### Relative chlor figures
+
+#### By group
+
+```{r}
+# chlor curves
+###################
+
+#move points .05 to the left and right
+pd = position_dodge(2) 
+
+
+# Relative chlor 
+Relchlor_curve = chlor.df %>%
+  mutate(Treatment = factor(group, 
+  levels=c("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U"))) %>% 
+  ggplot(aes(x=measurement.date, y=chlorophyll.rel*100, colour=Treatment, group=Treatment)) +
+  
+  geom_hline(yintercept = 15, colour="lightgrey")+
+  geom_hline(yintercept = 50, colour="lightgrey")+
+  geom_hline(yintercept = 75, colour="lightgrey")+
+  geom_hline(yintercept = 90, colour="lightgrey")+
+  geom_hline(yintercept = 100, colour="lightgrey")+
+  
+  geom_vline(xintercept = as.Date('2023-11-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-10-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-09-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-08-01'), colour="lightgrey")+
+  
+  stat_summary(fun.data = "mean_se", geom="line", size = 1.2, position=pd, alpha=0.7) +
+  stat_summary(fun.data = "mean_se", geom="errorbar", size = 0.8, width=0, position=pd) +
+  stat_summary(fun.data = "mean_se", geom="point", size = 1.2, position=pd) +
+  
+  scale_color_manual(values = chlorpal)+
+  
+  coord_cartesian(ylim=c(0,100),xlim=c(as.Date(c('2023-07-04','2023-12-16'))))+
+  
+  xlab("") +
+  ylab("Relative chlorophyll content (%)") +
+  
+  #ggtitle("Relative chlor ")+
+  
+  plotTheme1
+
+Relchlor_curve
+
+```
+
+#### By individual
+
+```{r}
+
+# plot relative chlor length for all individs
+individ.relchlor.curves = chlor.df %>% ggplot(
+  aes(x=measurement.date,y=chlorophyll.rel*100,colour = group, fill = group)) +
+  
+  geom_vline(xintercept = as.Date('2023-11-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-10-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-09-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-08-01'), colour="lightgrey")+
+  geom_vline(xintercept = as.Date('2023-07-01'), colour="lightgrey")+
+  
+  geom_hline(yintercept = 15, colour="lightgrey")+
+  geom_hline(yintercept = 50, colour="lightgrey")+
+  geom_hline(yintercept = 75, colour="lightgrey")+
+  geom_hline(yintercept = 90, colour="lightgrey")+
+  geom_hline(yintercept = 100, colour="lightgrey")+
+
+  
+  geom_line(aes(x=measurement.date, y=chlorophyll.rel*100), color="black")+
+  geom_point()+
+  
+  geom_vline(data=senescence.data.50, 
+             aes(xintercept = EOS), linetype = "dashed", colour = 'blue')+
+  
+  coord_cartesian(ylim=c(0,110),xlim=c(as.Date(c('2023-07-02','2023-12-16'))))+
+  
+  xlab("Date") +
+  ylab("Relative chlor (%)") +
+    facet_wrap(~id, dir='v', nrow = 15) +
+    plotTheme1 +
+  theme(legend.position = "none")
+  
+individ.relchlor.curves
+  #Save PDF
+#ggsave(paste(output.path, "individv_chlor_curves.pdf", sep = "/"), height = 40, width = 40)
+  
+
+```
+
+## Reproducibility
+
+```{r}
+
+sessionInfo()
+
+```
