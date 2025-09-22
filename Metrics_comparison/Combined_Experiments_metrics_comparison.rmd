@@ -1,0 +1,191 @@
+---
+title: "Combined_Experiments_metrics_comparison"
+author: "Dominic Rebindaine"
+date: "2025-09-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r message=F}
+#####################
+# Required packages #
+#####################
+library(tidyverse)
+library(lme4)
+library(emmeans)
+library(ggpubr)
+library(ggpmisc)
+
+```
+
+
+```{r }
+
+### paths
+
+input.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/data'
+
+output.path = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_1/figures'
+
+```
+
+
+```{r }
+
+# Plot theme
+#####################################
+plotTheme1 = theme(
+  legend.position   = "none",
+  legend.background = element_rect(fill=NA, linewidth=0.5, linetype="solid"),
+  legend.text       = element_text(color="black"),
+  panel.background  = element_blank(),
+  axis.text         = element_text(colour = "black", size = 20),
+  axis.title        = element_text(colour = "black", size = 22),
+  panel.border      = element_rect(colour = "black", fill=NA),
+  axis.line         = element_line(color = "black"),
+  strip.background  = element_rect(fill=NA),
+  strip.text        = element_text(colour = 'black'),
+  plot.title        = element_text(face="bold",hjust = 0.5))
+```
+
+## Prepare data
+```{r }
+
+# read in data
+senescence.data1 = read.csv(paste(input.path, "senescence_data_experiment1.csv", sep = "/"))
+bud.data1 = read.csv(paste(input.path, "bud_set_data_experiment1.csv", sep = "/"))
+
+senescence.data2 = read.csv("/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/Data/senescence_data_experiment2.csv")
+bud.data2 = read.csv("/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/Data/bud_set_data_experiment2.csv")
+
+
+senescence.data1 = senescence.data1 %>% 
+  mutate(Treatment = paste(lo.timing, treat.cool.combined, sep = "."),
+         experiment = 1) %>% 
+  select(id, Treatment, EOS, EOS.DOY, phenophase, experiment)
+
+senescence.data2 = senescence.data2 %>% 
+  mutate(id = parse_number(id), experiment = 2)
+
+senescence.data = rbind(senescence.data1, senescence.data2)
+
+bud.data1 = bud.data1 %>% 
+  mutate(Treatment = paste(lo.timing, treat.cool.combined, sep = "."),
+         experiment = 1) %>% 
+  select(id, Treatment, bud.type, EOS, EOS.DOY, experiment)
+
+bud.data2 = bud.data2 %>% 
+  mutate(experiment = 2) %>% 
+  rename(id = ID, bud.type = bud_type)
+  
+bud.data = rbind(bud.data1, bud.data2)
+
+
+  # Prepare bud data
+  bud.data.compare = bud.data %>%
+    group_by(id, Treatment) %>%
+    mutate(EOS.DOY.mean = mean(EOS.DOY),
+           metric = "bud") %>%
+    filter(bud.type == 'apical') %>%
+    select(id, Treatment, metric, EOS.DOY.mean, experiment) %>%
+    rename(EOS.DOY = EOS.DOY.mean)
+  
+  ids = as.vector(bud.data.compare$id)
+  
+  # Prepare senescence data
+  senescence.data.compare = senescence.data %>%
+    filter(phenophase == "EOS50") %>%
+    mutate(metric = "sen") %>%
+    filter(id %in% ids) %>%
+    select(id, Treatment, metric, EOS.DOY, experiment)
+  
+  # ensure each df has the same ids
+  ids2 = as.vector(senescence.data.compare$id)
+  
+  bud.data.compare = bud.data.compare %>%
+    filter(id %in% ids2)
+  
+  # Combine data
+  compare_bud_sen = rbind(bud.data.compare, senescence.data.compare)
+  
+```
+
+## Compute comparisons
+```{r }
+
+  # Mixed model
+  m_combined1 = lmer(EOS.DOY ~ Treatment * metric + (1 | id), data = compare_bud_sen %>% filter(experiment == 1))
+  model_anova1 = anova(m_combined1)
+ 
+   m_combined2 = lmer(EOS.DOY ~ Treatment * metric + (1 | id), data = compare_bud_sen %>% filter(experiment == 2))
+  model_anova2 = anova(m_combined2)
+  
+  # Estimated marginal means
+  emm1 = emmeans(m_combined1, ~ Treatment | metric)
+  emm2 = emmeans(m_combined2, ~ Treatment | metric)
+
+  
+  # Pairwise comparisons
+  pairwise_within_emm1 = contrast(emm1, method = "revpairwise", infer = c(TRUE, TRUE))
+  pairwise_within_emm2 = contrast(emm2, method = "revpairwise", infer = c(TRUE, TRUE))
+  
+  pairwise_within_df = rbind(
+    as.data.frame(pairwise_within_emm1) %>% mutate(experiment = 1), 
+                  as.data.frame(pairwise_within_emm2) %>% mutate(experiment = 2)
+    )
+
+  # clean table
+  pairwise_within_df_clean = pairwise_within_df %>%
+    select(contrast, metric, experiment, estimate, SE, df, t.ratio, p.value) %>%
+    mutate(across(where(is.numeric), ~ round(., 3))) %>%
+    arrange(contrast)
+  
+  pairwise_within_df_clean
+```
+
+## Show comparisons
+```{r }
+# Widen pairwise for comparison
+  wide_pairwise_within = pairwise_within_df %>%
+    pivot_wider(names_from = metric, values_from = -c(contrast, metric, experiment)) %>%
+    mutate(differ = sign(estimate_bud) == sign(estimate_sen))
+  
+  # Count agreement in sign
+  same_sign = wide_pairwise_within %>% filter(differ == TRUE) %>% count()
+  total = nrow(wide_pairwise_within)
+  percent_same_sign = (same_sign$n / total) * 100
+  
+same_sign
+total
+percent_same_sign
+
+  # Plot treatment effect per metric
+  plot_pairwise_effect = ggplot(wide_pairwise_within, aes(x = estimate_bud, y = estimate_sen)) +
+    geom_point(size = 2) +
+    geom_errorbar(aes(ymin = estimate_sen - SE_sen, ymax = estimate_sen + SE_sen), width = 0.1) +
+    geom_errorbarh(aes(xmin = estimate_bud - SE_bud, xmax = estimate_bud + SE_bud), height = 0.1) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    coord_cartesian(xlim = c(-10,16), ylim = c(-10,16), expand = F) +
+    stat_poly_line(colour = '#d95f02', linetype = "dashed") +
+    stat_poly_eq(colour = "#d95f02", label.y = .9, size = 7) +
+    geom_abline(intercept = 0, slope = 1, colour = "#7570b3") +
+    labs(y = "Treatment effect on leaves (days)", x = "Treatment effect on buds (days)") +
+    plotTheme1
+  
+  plot_pairwise_effect
+
+# save plot
+ # ggsave(plot = plot_pairwise_effect, path = output.path, 
+         #filename = "SuppFig_Pairwise_Metric_Comparison.pdf", h = 6, w = 10)
+  
+```
+
+## Reproducibility
+```{r }
+sessionInfo()
+```
