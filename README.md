@@ -9,8 +9,9 @@ This repository holds the code used to analyse bud length and leaf chlorophyll d
 - Run bud and chlorophyll anlayses
 - Plot Figure 6
 - Compare control treatments (outside vs. chamber)
+- Plot supplemental figure 12 - assimilation rates
 - Check climate variables
 
 ## Metrics comparison
-- Use datasets saved in Experiment 1 and 2 analyses (also provided on Zenodo)
-- Compare treatment effects on bud set and leaf senescence dates
+- Use datasets saved in Experiment 1 and 2 analyses (also provided in this repository as bud/senescence_data_experiment_1/2.csv)
+- Compare treatment effects on bud set and leaf senescence dates (plot supplemental figure 11)
