@@ -1,0 +1,132 @@
+---
+title: "Experiment_2_assimilation"
+author: "Dominic Rebindaine"
+date: "2025-09-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r cars}
+#####################
+# Required packages #
+#####################
+require(tidyverse)
+require(readxl)
+
+```
+
+
+
+```{r}
+
+
+# 2. Load data ------------------------------------------------------------
+
+#data tables
+# define paths #
+data.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/Data'
+output.dir = '/Users/dominic/Library/Mobile Documents/com~apple~CloudDocs/Documents/PhD/development_2022_2023/analysis/experiment_2/figures'
+
+# Load licor data #
+licor.data <- read_excel(paste(data.dir,"Li-Cor_data.xlsx",sep = '/')) %>%
+  # group col from ID
+  mutate(Group = substr(ID,1,1)) %>% 
+  
+  #delete NAs
+  filter(!is.na(E)) %>%
+  filter(!is.na(Emm)) %>%
+  filter(!is.na(A)) %>%
+  filter(!is.na(gsw)) %>%
+  
+  #Convert dates to DOY
+  mutate(
+    Group= ifelse(Group=="C","A",Group),
+    #remove negative values
+    E=ifelse(E<0,0,E),
+    Emm=ifelse(Emm<0,0,Emm),
+    A=ifelse(A<0,0,A),
+    gsw=ifelse(gsw<0,0,gsw),
+    
+    # treatment names
+    Treatment = ifelse(Group %in% c("B"),"Removal",
+                       ifelse(Group %in% c("G"),"pre_full",
+                              ifelse(Group %in% c("F"), "pre_night",
+                                     ifelse(Group %in% c("E"), "pre_day",
+                                            ifelse(Group %in% c("D"), "pre_chamber_control",
+                                                   ifelse(Group %in% c("H"), "post_chamber_control",
+                                            ifelse(Group %in% c("I"), "post_day", 
+                                                   ifelse(Group %in% c("J"), "post_night",
+                                                          ifelse(Group %in% c("K"),"post_full", "Control")))))))))) %>%
+    # remove B treatment
+  filter(Treatment != "Removal") %>% 
+  #remove duplicates
+  group_by(ID) %>% slice_tail(n=1)  %>%
+  ungroup()
+
+
+### recode vars
+licor.data$A = as.numeric(licor.data$A)
+licor.data$E = as.numeric(licor.data$E)
+licor.data$Emm = as.numeric(licor.data$Emm)
+licor.data$gsw = as.numeric(licor.data$gsw)
+
+### clean data by removing all rows with values of A higher than 100 (highly unlikely to be real) 
+## and also rows with Tair higher than 30 as leaf chamber was set to max 20
+licor.data = licor.data %>% filter(A <= 100)
+licor.data = licor.data %>% filter(Tair <= 30)
+
+
+# summarise average relative assimilation rates for each treatment
+sum.assim = licor.data %>% group_by(Treatment) %>% 
+  summarise(a = mean(A), sd.a = sd(A))
+
+
+# add column comparing mean A rate of each treatment to A rate of control
+sum.assim$rel.a.control = sum.assim$a/sum.assim$a[sum.assim$Treatment == 'Control']
+
+sum.assim
+
+#ggplot themes
+plotTheme1 = theme(
+  legend.position   = "None",
+  legend.background = element_rect(fill=NA, linewidth=0.5, linetype="solid"),
+  legend.text       = element_text(color="black"),
+  panel.background  = element_blank(),
+  axis.text         = element_text(colour = "black", size = 22),
+  axis.title        = element_text(colour = "black", size = 24),
+  panel.border      = element_rect(colour = "black", fill=NA),
+  axis.line         = element_line(color = "black"),
+  strip.background  = element_rect(fill=NA),
+  strip.text        = element_text(colour = 'black'),
+  plot.title        = element_text(face="bold",hjust = 0.5))
+
+# make a summary data frame with one row per Treatment
+label_df = licor.data %>%
+  group_by(Treatment) %>%
+  summarise(Treatment_count = n(), .groups = "drop")
+
+# plot
+pre_assim_all_plot = licor.data %>% 
+  ggplot(aes(Treatment, A, fill = Treatment)) +
+  geom_boxplot() + 
+  geom_label(
+    data = label_df, 
+    aes(x = Treatment, y = 16, label = Treatment_count, fill = Treatment), 
+    inherit.aes = FALSE
+  ) +
+  scale_x_discrete(labels = c("Control", "Post_CC","Post_Day","Post_Full-day","Post_Night",
+                              "Pre_CC","Pre_Day","Pre_Full-day","Pre_Night")) +
+  scale_fill_manual(values = c("grey", rep("#3B9AB2", 4), rep("#F21A00", 4))) +
+  plotTheme1 +
+  coord_cartesian(ylim = c(0,16))
+
+pre_assim_all_plot
+#ggsave(paste(output.dir, 'pre_assimilation_all.pdf', sep = '/'), width = 16, height = 7)
+
+```
+
